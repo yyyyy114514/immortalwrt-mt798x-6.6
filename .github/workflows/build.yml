@@ -115,9 +115,12 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           echo "CCACHE_DIR=$CCACHE_DIR"
           echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}  (首次无缓存为冷编译, 约2-3h)"
-          make -j${{ github.event.inputs.jobs }} V=s 2>&1 | tee build.log | grep -iE "^(make|.*error|\s+ERROR)" || true
-          # 编译结束
-          echo "build finished"
+          # 完整输出写入 build.log; 失败时把末尾真实报错打到控制台并用正确退出码结束,
+          # 避免管道/|| true 吞掉错误。
+          make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
+            || { echo "===== BUILD FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
+          echo "===== BUILD OK ====="
+          tail -5 build.log
 
       - name: Verify build output
         run: |
@@ -132,11 +135,13 @@ jobs:
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: immortalwrt-n60pro-mtwifi-easymesh
           path: |
             bin/targets/mediatek/filogic/**/*
             build.log
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Upload to Release
