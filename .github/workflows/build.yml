@@ -54,7 +54,7 @@ jobs:
             python3 python3-setuptools python3-pyelftools python3-pip \
             time qemu-utils ecj fastjar java-propose-classpath \
             libelf-dev autoconf automake libtool shtool git-core subversion \
-            ca-certificates file wget curl rsync which \
+            ca-certificates file wget curl rsync \
             device-tree-compiler libgmp3-dev libmpc-dev
           pip3 install pyelftools
 
