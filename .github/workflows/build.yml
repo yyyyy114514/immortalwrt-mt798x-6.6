@@ -1,0 +1,142 @@
+name: Build MT7986 ImmortalWrt (mtwifi + EasyMesh)
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "defconfig 文件名"
+        required: true
+        default: "mt7986-ax6000.config"
+        type: choice
+        options:
+          - mt7986-ax6000.config
+          - mt7981-ax3000.config
+      jobs:
+        description: "编译线程数"
+        required: false
+        default: "8"
+      upload_release:
+        description: "是否上传到 Release"
+        required: false
+        default: "yes"
+        type: choice
+        options:
+          - "yes"
+          - "no"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gcc-multilib g++-multilib \
+            libncurses5-dev libncursesw5-dev zlib1g-dev gawk gettext libssl-dev \
+            xsltproc unzip libxml-parser-perl mercurial bc rsync ocaml-nox \
+            python3 python3-setuptools python3-pyelftools python3-pip \
+            time qemu-utils ecj fastjar java-propose-classpath \
+            libelf-dev autoconf automake libtool shtool git-core subversion \
+            ca-certificates file wget curl rsync which \
+            device-tree-compiler libgmp3-dev libmpc-dev
+          pip3 install pyelftools
+
+      - name: Set git config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply defconfig
+        run: |
+          echo "使用 defconfig: ${{ github.event.inputs.defconfig }}"
+          cp defconfig/${{ github.event.inputs.defconfig }} .config
+
+      - name: Update feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate full config
+        run: |
+          make defconfig
+          echo "=== 验证关键包 ==="
+          grep -E "mtwifi-wapp|smartdns|adguardhome|containerd|dockerman" .config || true
+
+      - name: Download sources
+        run: |
+          make download -j${{ github.event.inputs.jobs }} || make download -j1
+
+      - name: Build firmware
+        run: |
+          echo "开始编译，线程数: ${{ github.event.inputs.jobs }}"
+          make -j${{ github.event.inputs.jobs }} V=s 2>&1 | tee build.log | grep -i -E "^make.*(error|[1-9][0-9]*)" || true
+
+      - name: Check build result
+        run: |
+          if [ -d "bin/targets/mediatek/filogic/" ]; then
+            echo "=== 编译成功，产物列表 ==="
+            find bin/targets/mediatek/filogic/ -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img" -o -name "*.tar.gz" \) | sort
+          else
+            echo "=== 编译失败，最后100行日志 ==="
+            tail -100 build.log
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-mt798x-mtwifi-easymesh
+          path: |
+            bin/targets/mediatek/filogic/**/*.bin
+            bin/targets/mediatek/filogic/**/*.itb
+            bin/targets/mediatek/filogic/**/*.img
+            bin/targets/mediatek/filogic/**/*.tar.gz
+            build.log
+          retention-days: 7
+
+      - name: Upload to Release
+        if: ${{ github.event.inputs.upload_release == 'yes' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mt798x-build-${{ github.run_number }}
+          name: ImmortalWrt MT798x (mtwifi + EasyMesh)
+          body: |
+            ## ImmortalWrt MT798x 固件
+
+            - 源码: padavanonly/immortalwrt-mt798x-6.6 (openwrt-24.10-6.6)
+            - 内核: 6.6
+            - 驱动: mtwifi 闭源驱动 7.6.6.1
+            - EasyMesh: mtwifi-wapp (MAP R2/R3, 802.11k/v/r, Band Steering)
+            - 附加: SmartDNS, AdGuardHome, Docker 依赖 (containerd/runc/dockerman)
+
+            ### 默认登录
+            - 用户名: root
+            - 密码: 无
+
+            ### EasyMesh 启用
+            LuCI -> 网络 -> 无线 -> 射频 -> 高级设置 -> 勾选 WAPP -> 保存应用
+          files: |
+            bin/targets/mediatek/filogic/**/*.bin
+            bin/targets/mediatek/filogic/**/*.itb
+            bin/targets/mediatek/filogic/**/*.img
+            bin/targets/mediatek/filogic/**/*.tar.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
