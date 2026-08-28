@@ -70,7 +70,7 @@ jobs:
           path: |
             dl
             package/mtk/drivers/mt_wifi/src
-          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default', 'defconfig/*.config') }}
+          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default', 'defconfig/mt7986-n60pro.config') }}
           restore-keys: |
             dl-${{ github.ref_name }}-
             dl-
@@ -78,8 +78,8 @@ jobs:
       - name: Cache ccache
         uses: actions/cache@v4
         with:
-          path: /workspace/.ccache
-          key: ccache-${{ github.event.inputs.defconfig }}-${{ hashFiles('defconfig/*.config') }}
+          path: $HOME/.ccache
+          key: ccache-${{ github.event.inputs.defconfig }}-${{ hashFiles('feeds.conf.default', 'defconfig/mt7986-n60pro.config') }}
           restore-keys: |
             ccache-${{ github.event.inputs.defconfig }}-
             ccache-
@@ -110,8 +110,11 @@ jobs:
 
       - name: Build firmware
         run: |
+          echo "ccache version: $(ccache --version | head -1)"
+          export CCACHE_DIR="$HOME/.ccache"
           export PATH="/usr/lib/ccache:$PATH"
-          echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}"
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}  (首次无缓存为冷编译, 约2-3h)"
           make -j${{ github.event.inputs.jobs }} V=s 2>&1 | tee build.log | grep -iE "^(make|.*error|\s+ERROR)" || true
           # 编译结束
           echo "build finished"
