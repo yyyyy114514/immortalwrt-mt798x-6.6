@@ -1,28 +1,30 @@
-name: Build MT7986 ImmortalWrt (mtwifi + EasyMesh)
+name: Build ImmortalWrt MT7986 (mtwifi + EasyMesh) — Netcore N60 Pro
 
 on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "defconfig 文件名"
+        description: "defconfig 文件名 (在 defconfig/ 下)"
         required: true
-        default: "mt7986-ax6000.config"
-        type: choice
-        options:
-          - mt7986-ax6000.config
-          - mt7981-ax3000.config
+        default: "mt7986-n60pro.config"
+        type: string
       jobs:
         description: "编译线程数"
         required: false
         default: "8"
+        type: number
       upload_release:
-        description: "是否上传到 Release"
+        description: "是否上传到 GitHub Release"
         required: false
-        default: "yes"
+        default: "no"
         type: choice
         options:
-          - "yes"
           - "no"
+          - "yes"
+
+concurrency:
+  group: build-immortalwrt-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -30,32 +32,30 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
-      - name: Checkout source
+      - name: Checkout source (本仓即 ImmortalWrt 源码树)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
           df -h
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gcc-multilib g++-multilib \
-            libncurses5-dev libncursesw5-dev zlib1g-dev gawk gettext libssl-dev \
-            xsltproc unzip libxml-parser-perl mercurial bc rsync ocaml-nox \
+            binutils bzip2 cpio curl ccache file fastjar gawk gettext \
+            git-core java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev libtool libxml-parser-perl make \
             python3 python3-setuptools python3-pyelftools python3-pip \
-            time qemu-utils ecj fastjar java-propose-classpath \
-            libelf-dev autoconf automake libtool shtool git-core subversion \
-            ca-certificates file wget curl rsync \
-            device-tree-compiler libgmp3-dev libmpc-dev
+            qemu-utils rsync scons subversion swig time uglifyjs unzip \
+            upx-ucl wget xsltproc zlib1g-dev device-tree-compiler \
+            libgmp3-dev libmpc-dev libmpfr-dev autoconf automake
           pip3 install pyelftools
 
       - name: Set git config
@@ -63,51 +63,76 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Apply defconfig
-        run: |
-          echo "使用 defconfig: ${{ github.event.inputs.defconfig }}"
-          cp defconfig/${{ github.event.inputs.defconfig }} .config
+      # ===== 缓存: dl / ccache / toolchain(可选) =====
+      - name: Cache dl (源码下载缓存)
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            package/mtk/drivers/mt_wifi/src
+          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default', 'defconfig/*.config') }}
+          restore-keys: |
+            dl-${{ github.ref_name }}-
+            dl-
 
-      - name: Update feeds
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /workspace/.ccache
+          key: ccache-${{ github.event.inputs.defconfig }}-${{ hashFiles('defconfig/*.config') }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.defconfig }}-
+            ccache-
+
+      # ===== feeds =====
+      - name: Update & install feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      # ===== 配置 =====
+      - name: Apply defconfig
+        run: |
+          cp -f defconfig/${{ github.event.inputs.defconfig }} .config
+          sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
+          # 强制仅编译目标设备 (防止多设备批编译)
+          grep -E "CONFIG_TARGET_DEVICE_mediatek" .config || true
+
       - name: Generate full config
         run: |
           make defconfig
-          echo "=== 验证关键包 ==="
-          grep -E "mtwifi-wapp|smartdns|adguardhome|containerd|dockerman" .config || true
+          echo "=== 关键包校验 ==="
+          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-openclash|luci-theme-argon|luci-app-dockerman|luci-lib-docker|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
 
       - name: Download sources
         run: |
-          make download -j${{ github.event.inputs.jobs }} || make download -j1
+          make download -j${{ github.event.inputs.jobs }} 2>&1 | tee -a download.log || make download -j1
 
       - name: Build firmware
         run: |
-          echo "开始编译，线程数: ${{ github.event.inputs.jobs }}"
-          make -j${{ github.event.inputs.jobs }} V=s 2>&1 | tee build.log | grep -i -E "^make.*(error|[1-9][0-9]*)" || true
+          export PATH="/usr/lib/ccache:$PATH"
+          echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}"
+          make -j${{ github.event.inputs.jobs }} V=s 2>&1 | tee build.log | grep -iE "^(make|.*error|\s+ERROR)" || true
+          # 编译结束
+          echo "build finished"
 
-      - name: Check build result
+      - name: Verify build output
         run: |
-          if [ -d "bin/targets/mediatek/filogic/" ]; then
-            echo "=== 编译成功，产物列表 ==="
-            find bin/targets/mediatek/filogic/ -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img" -o -name "*.tar.gz" \) | sort
+          if ls bin/targets/mediatek/filogic/*/ 2>/dev/null | grep -E "netcore-n60-pro" ; then
+            echo "=== 编译成功, N60 Pro 固件 ==="
+            find bin/targets/mediatek/filogic -type f \( -name "*netcore-n60-pro*" -o -name "*.bin" -o -name "*.itb" -o -name "*.tar.gz" \) | sort
           else
-            echo "=== 编译失败，最后100行日志 ==="
-            tail -100 build.log
+            echo "=== 编译失败，最后 150 行日志 ==="
+            tail -150 build.log
             exit 1
           fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-mt798x-mtwifi-easymesh
+          name: immortalwrt-n60pro-mtwifi-easymesh
           path: |
-            bin/targets/mediatek/filogic/**/*.bin
-            bin/targets/mediatek/filogic/**/*.itb
-            bin/targets/mediatek/filogic/**/*.img
-            bin/targets/mediatek/filogic/**/*.tar.gz
+            bin/targets/mediatek/filogic/**/*
             build.log
           retention-days: 7
 
@@ -115,28 +140,26 @@ jobs:
         if: ${{ github.event.inputs.upload_release == 'yes' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: mt798x-build-${{ github.run_number }}
-          name: ImmortalWrt MT798x (mtwifi + EasyMesh)
+          tag_name: n60pro-build-${{ github.run_number }}
+          name: ImmortalWrt MT7986 (mtwifi + EasyMesh) — Netcore N60 Pro
           body: |
-            ## ImmortalWrt MT798x 固件
+            ## ImmortalWrt MT7986 固件 — 磊科 N60 Pro
 
             - 源码: padavanonly/immortalwrt-mt798x-6.6 (openwrt-24.10-6.6)
-            - 内核: 6.6
-            - 驱动: mtwifi 闭源驱动 7.6.6.1
+            - 内核: 6.6 / 驱动: mtwifi 闭源 7.6.6.1
             - EasyMesh: mtwifi-wapp (MAP R2/R3, 802.11k/v/r, Band Steering)
-            - 附加: SmartDNS, AdGuardHome, Docker 依赖 (containerd/runc/dockerman)
+            - 插件: turboacc-mtk, AdGuardHome, SmartDNS, OpenClash, Argon, dockerman(面板)
+            - Docker: 仅 LuCI 面板, 不含 docker/dockerd/containerd/runc
 
             ### 默认登录
-            - 用户名: root
-            - 密码: 无
+            - 地址: http://192.168.6.1
+            - 用户名: root / 密码: 无
 
-            ### EasyMesh 启用
-            LuCI -> 网络 -> 无线 -> 射频 -> 高级设置 -> 勾选 WAPP -> 保存应用
+            ### 启用 EasyMesh
+            LuCI → 网络 → 无线 → 射频 → 高级设置 → 勾选 WAPP → 保存并应用
+            (需多台 N60 Pro 通过有线/无线回传组成网格)
           files: |
             bin/targets/mediatek/filogic/**/*.bin
             bin/targets/mediatek/filogic/**/*.itb
-            bin/targets/mediatek/filogic/**/*.img
             bin/targets/mediatek/filogic/**/*.tar.gz
           token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
