@@ -187,9 +187,9 @@ jobs:
 
       - name: Verify build output
         run: |
-          if ls bin/targets/mediatek/filogic/ 2>/dev/null | grep -E "netcore-n60-pro" ; then
+          if ls bin/targets/mediatek/filogic/ 2>/dev/null | grep -E "netcore[-_]n60[-_]pro" ; then
             echo "=== 编译成功, N60 Pro 固件 ==="
-            find bin/targets/mediatek/filogic -type f \( -name "*netcore-n60-pro*" -o -name "*.bin" -o -name "*.itb" -o -name "*.tar.gz" \) | sort
+            find bin/targets/mediatek/filogic -type f \( -name "*netcore-n60-pro*" -o -name "*netcore_n60-pro*" -o -name "*.itb" -o -name "*.tar.gz" \) | sort
           else
             echo "=== 编译失败，最后 150 行日志 ==="
             tail -150 build.log
