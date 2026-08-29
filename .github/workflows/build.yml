@@ -63,8 +63,9 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # ===== 缓存: dl / ccache / toolchain(可选) =====
+      # ===== 缓存: dl / ccache / toolchain =====
       - name: Cache dl (源码下载缓存)
+        id: cache-dl
         uses: actions/cache@v4
         with:
           path: |
@@ -76,13 +77,29 @@ jobs:
             dl-
 
       - name: Cache ccache
+        id: cache-ccache
         uses: actions/cache@v4
         with:
-          path: $HOME/.ccache
+          path: ~/.ccache
           key: ccache-${{ github.event.inputs.defconfig }}-${{ hashFiles('feeds.conf.default', 'defconfig/mt7986-n60pro.config') }}
           restore-keys: |
             ccache-${{ github.event.inputs.defconfig }}-
             ccache-
+
+      - name: Cache toolchain (工具链缓存, 省约1h)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/toolchain-*
+            staging_dir/host
+            staging_dir/host_*
+            build_dir/toolchain-*
+            build_dir/host-*
+            build_dir/host
+          key: toolchain-mt7986-${{ hashFiles('target/linux/mediatek/Makefile', 'toolchain/*') }}
+          restore-keys: |
+            toolchain-mt7986-
 
       # ===== feeds =====
       - name: Update & install feeds
@@ -95,18 +112,30 @@ jobs:
         run: |
           cp -f defconfig/${{ github.event.inputs.defconfig }} .config
           sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
-          # 强制仅编译目标设备 (防止多设备批编译)
           grep -E "CONFIG_TARGET_DEVICE_mediatek" .config || true
 
       - name: Generate full config
         run: |
           make defconfig
           echo "=== 关键包校验 ==="
-          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-openclash|luci-theme-argon|luci-app-dockerman|luci-lib-docker|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
+          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-openclash|luci-theme-argon|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
 
       - name: Download sources
         run: |
           make download -j${{ github.event.inputs.jobs }} 2>&1 | tee -a download.log || make download -j1
+
+      # ===== 分阶段编译: toolchain → target → packages → image =====
+      - name: Build toolchain (如果无缓存则编译, 约1h)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          export PATH="/usr/lib/ccache:$PATH"
+          echo "===== 编译工具链 (首次约1h, 有缓存则跳过) ====="
+          make tools/install -j${{ github.event.inputs.jobs }} V=s > toolchain.log 2>&1 \
+            || { echo "===== TOOLS FAILED ====="; tail -100 toolchain.log; exit 1; }
+          make toolchain/install -j${{ github.event.inputs.jobs }} V=s >> toolchain.log 2>&1 \
+            || { echo "===== TOOLCHAIN FAILED ====="; tail -100 toolchain.log; exit 1; }
+          echo "===== TOOLCHAIN OK ====="
 
       - name: Build firmware
         run: |
@@ -114,10 +143,8 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           export PATH="/usr/lib/ccache:$PATH"
           echo "CCACHE_DIR=$CCACHE_DIR"
-          echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}  (首次无缓存为冷编译, 约2-3h)"
-          # 完整输出写入 build.log; 失败时把末尾真实报错打到控制台并用正确退出码结束,
-          # 避免管道/|| true 吞掉错误。
-          # 注意: make world 只编译包不生成固件, 必须再 make image 才会产出 .bin 固件
+          echo "===== 开始编译 (有 toolchain+ccache 缓存约30-50min) ====="
+          # make world 编译内核+所有包, make image 生成固件镜像
           make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
             || { echo "===== BUILD FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
           make image V=s >> build.log 2>&1 \
@@ -125,9 +152,39 @@ jobs:
           echo "===== BUILD OK ====="
           tail -5 build.log
 
+      # ===== 即使失败也保存缓存 (避免每次失败都白编) =====
+      - name: Save ccache (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.event.inputs.defconfig }}-${{ hashFiles('feeds.conf.default', 'defconfig/mt7986-n60pro.config') }}-${{ github.run_id }}
+
+      - name: Save toolchain (always)
+        if: always() && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            staging_dir/toolchain-*
+            staging_dir/host
+            staging_dir/host_*
+            build_dir/toolchain-*
+            build_dir/host-*
+            build_dir/host
+          key: toolchain-mt7986-${{ hashFiles('target/linux/mediatek/Makefile', 'toolchain/*') }}-${{ github.run_id }}
+
+      - name: Save dl (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dl
+            package/mtk/drivers/mt_wifi/src
+          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default', 'defconfig/mt7986-n60pro.config') }}-${{ github.run_id }}
+
       - name: Verify build output
         run: |
-          if ls bin/targets/mediatek/filogic/*/ 2>/dev/null | grep -E "netcore-n60-pro" ; then
+          if ls bin/targets/mediatek/filogic/ 2>/dev/null | grep -E "netcore-n60-pro" ; then
             echo "=== 编译成功, N60 Pro 固件 ==="
             find bin/targets/mediatek/filogic -type f \( -name "*netcore-n60-pro*" -o -name "*.bin" -o -name "*.itb" -o -name "*.tar.gz" \) | sort
           else
@@ -159,8 +216,7 @@ jobs:
             - 源码: padavanonly/immortalwrt-mt798x-6.6 (openwrt-24.10-6.6)
             - 内核: 6.6 / 驱动: mtwifi 闭源 7.6.6.1
             - EasyMesh: mtwifi-wapp (MAP R2/R3, 802.11k/v/r, Band Steering)
-            - 插件: turboacc-mtk, AdGuardHome, SmartDNS, OpenClash, Argon, dockerman(面板)
-            - Docker: 仅 LuCI 面板, 不含 docker/dockerd/containerd/runc
+            - 插件: turboacc-mtk, AdGuardHome, SmartDNS, OpenClash, Argon
 
             ### 默认登录
             - 地址: http://192.168.6.1
@@ -168,7 +224,6 @@ jobs:
 
             ### 启用 EasyMesh
             LuCI → 网络 → 无线 → 射频 → 高级设置 → 勾选 WAPP → 保存并应用
-            (需多台 N60 Pro 通过有线/无线回传组成网格)
           files: |
             bin/targets/mediatek/filogic/**/*.bin
             bin/targets/mediatek/filogic/**/*.itb
