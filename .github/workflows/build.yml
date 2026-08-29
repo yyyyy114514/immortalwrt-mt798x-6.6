@@ -144,13 +144,16 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           echo "CCACHE_DIR=$CCACHE_DIR"
           echo "===== 开始编译 (有 toolchain+ccache 缓存约30-50min) ====="
-          # make world 编译内核+所有包, make image 生成固件镜像
+          # 说明: ImmortalWrt/OpenWrt 顶层不支持 'make image',
+          #   镜像生成由 target/linux/install 在 make world 内部跑完。
+          #   make 失败时直接输出末尾日志, 不再额外 make image
           make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
-            || { echo "===== BUILD FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
-          make image V=s >> build.log 2>&1 \
-            || { echo "===== IMAGE FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
+            || { echo "===== BUILD FAILED, 末尾 300 行 ====="; tail -300 build.log; exit 1; }
           echo "===== BUILD OK ====="
-          tail -5 build.log
+          echo "--- 最终产物列表 ---"
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img" -o -name "*.tar.gz" -o -name "*.sha" \) | sort
+          echo "--- ccache 统计 ---"
+          ccache -s | head -15
 
       # ===== 即使失败也保存缓存 (避免每次失败都白编) =====
       - name: Save ccache (always)
