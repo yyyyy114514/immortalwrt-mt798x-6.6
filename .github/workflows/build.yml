@@ -117,8 +117,11 @@ jobs:
           echo "开始编译, 线程数: ${{ github.event.inputs.jobs }}  (首次无缓存为冷编译, 约2-3h)"
           # 完整输出写入 build.log; 失败时把末尾真实报错打到控制台并用正确退出码结束,
           # 避免管道/|| true 吞掉错误。
+          # 注意: make world 只编译包不生成固件, 必须再 make image 才会产出 .bin 固件
           make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
             || { echo "===== BUILD FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
+          make image V=s >> build.log 2>&1 \
+            || { echo "===== IMAGE FAILED, 末尾 250 行 ====="; tail -250 build.log; exit 1; }
           echo "===== BUILD OK ====="
           tail -5 build.log
 
