@@ -1,4 +1,9 @@
 #!/bin/sh
+# startwapp.sh - EasyMesh (MAP/wapp/bs20) 启动脚本
+# 方案: wifi-profile + luci-app-mtk (l1profile.dat / dbdc dat), 无 UCI wireless
+# 数据源:
+#   /etc/wireless/l1profile.dat           -> 射频接口列表 (INDEX*_main_ifname)
+#   /etc/wireless/mediatek/*.dbdc.bN.dat  -> MapEnable 等 EasyMesh 开关
 
 LOG_TAG="wapp"
 
@@ -28,142 +33,89 @@ run_bg() {
     log_i "started pid=$!: $*"
 }
 
-log_i "startwapp.sh start"
+L1PROFILE=/etc/wireless/l1profile.dat
+DAT_DIR=/etc/wireless/mediatek
+
+log_i "startwapp.sh (wifi-profile) start"
 
 run_cmd sh -c "killall bs20 2>/dev/null || true"
 run_cmd sh -c "killall wapp 2>/dev/null || true"
-br0_mac=$(cat /sys/class/net/br-lan/address)
+
+br0_mac=$(cat /sys/class/net/br-lan/address 2>/dev/null)
 ctrlr_al_mac=$br0_mac
 agent_al_mac=$br0_mac
-ra0=0
-rax0=0
 
 log_i "bridge mac: ${br0_mac}"
 
-uci_get_default() {
-    local value
-    value="$(uci -q get "$1" 2>/dev/null)"
-    if [ -n "$value" ]; then
-        printf '%s' "$value"
-    else
-        printf '%s' "$2"
-    fi
+# 读取 dat 中某频段字段 (band 为 0 起始的频段序号)
+dat_get() {
+    local band=$1 field=$2 dat
+    dat=$(ls "$DAT_DIR"/*.dbdc.b${band}.dat 2>/dev/null | head -1)
+    [ -n "$dat" ] && sed -n "s/^${field}=//p" "$dat" | head -1
 }
 
+# 射频接口列表 (main_ifname=ra0;rax0), 按 ';' 拆分
+IFNAMES=$(sed -n 's/^INDEX[0-9]*_main_ifname=//p' "$L1PROFILE" 2>/dev/null | tr ';' ' ')
+[ -n "$IFNAMES" ] || IFNAMES="ra0"
+
+# 第一遍: 依据各频段 MapEnable 决定是否启动 wapp
 wapp_enabled=0
-for dev in $(uci -q show wireless | sed -n 's/^wireless\.\([^.]*\)=wifi-device$/\1/p'); do
-    dev_type="$(uci_get_default wireless.${dev}.type "")"
-    dev_wapp="$(uci_get_default wireless.${dev}.wapp 0)"
-    log_i "check device=${dev} type=${dev_type} wapp=${dev_wapp}"
-    [ "$dev_type" = "mtwifi" ] || continue
-    if [ "$(uci_get_default wireless.${dev}.wapp 0)" -eq "1" ]; then
+band=0
+for ifname in $IFNAMES; do
+    map_enable=$(dat_get "$band" MapEnable)
+    log_i "band=${band} if=${ifname} MapEnable=${map_enable}"
+    if [ -n "$map_enable" ] && [ "$map_enable" != "0" ]; then
         wapp_enabled=1
-        break
+        eval "map_${band}=1"
     fi
+    band=$((band+1))
 done
 
 if [ "$wapp_enabled" -ne "1" ]; then
-    log_i "wapp switch disabled, exit"
+    log_i "EasyMesh 未启用 (各频段 MapEnable=0), exit"
     exit 0
 fi
 
-log_i "wapp switch enabled, continue"
+log_i "EasyMesh enabled, continue"
 
 sleep 2
 
 run_cmd sed -i "s/map_controller_alid=.*/map_controller_alid=${ctrlr_al_mac}/g" /etc/map/1905d.cfg
 run_cmd sed -i "s/map_agent_alid=.*/map_agent_alid=${agent_al_mac}/g" /etc/map/1905d.cfg
 
-    ra0_7981="$(uci_get_default wireless.MT7981_1_1.bandsteering 0)"
-    ra0_7986="$(uci_get_default wireless.MT7986_1_1.bandsteering 0)"
-    if [ "$ra0_7981" -eq "1" ] || [ "$ra0_7986" -eq "1" ]; then
-    ra0=1
-    rax0=1
+# 第二遍: 组装 wapp 参数, 并对启用频段下发驱动 iwpriv
+wapp_args=""
+band=0
+for ifname in $IFNAMES; do
+    enabled=0
+    eval "enabled=\${map_${band}:-0}"
+    if [ "$enabled" -eq "1" ]; then
+        wapp_args="${wapp_args} -c${ifname}"
+        run_cmd iwpriv "$ifname" set mapEnable=2
+        run_cmd iwpriv "$ifname" set mapR2Enable=0
+        run_cmd iwpriv "$ifname" set mapTSEnable=0
+        run_cmd iwpriv "$ifname" set mapR3Enable=0
+        run_cmd iwpriv "$ifname" set DppEnable=0
     fi
-    
-    ra0_7981="$(uci_get_default wireless.MT7981_1_1.ieee80211r 0)"
-    ra0_7986="$(uci_get_default wireless.MT7986_1_1.ieee80211r 0)"
-    if [ "$ra0_7981" -eq "1" ] || [ "$ra0_7986" -eq "1" ]; then
-    ra0=1
-    fi
-    
-    ra0_7981="$(uci_get_default wireless.default_MT7981_1_2.steeringthresold 0)"
-    ra0_7986="$(uci_get_default wireless.default_MT7986_1_2.steeringthresold 0)"
-    if [ "$ra0_7981" -lt "0" ] || [ "$ra0_7986" -lt "0" ]; then
-    ra0=1
-    fi
-        
-    ra0_7981="$(uci_get_default wireless.default_MT7981_1_1.disabled 0)"
-    ra0_7986="$(uci_get_default wireless.default_MT7986_1_1.disabled 0)"
-    if [ "$ra0_7981" -eq "1" ] || [ "$ra0_7986" -eq "1" ]; then
-    ra0=0
-    rax0=0
-    fi
-    
-    rax0_7981="$(uci_get_default wireless.MT7981_1_2.ieee80211r 0)"
-    rax0_7986="$(uci_get_default wireless.MT7986_1_2.ieee80211r 0)"
-    if [ "$rax0_7981" -eq "1" ] || [ "$rax0_7986" -eq "1" ]; then
-    rax0=1
-    fi
-   
-    rax0_7981="$(uci_get_default wireless.default_MT7981_1_2.steeringthresold 0)"
-    rax0_7986="$(uci_get_default wireless.default_MT7986_1_2.steeringthresold 0)"
-    if [ "$rax0_7981" -lt "0" ] || [ "$rax0_7986" -lt "0" ]; then
-    rax0=1
-    fi
-    
-    rax0_7981="$(uci_get_default wireless.default_MT7981_1_2.disabled 0)"
-    rax0_7986="$(uci_get_default wireless.default_MT7986_1_2.disabled 0)"
-    if [ "$rax0_7981" -eq "1" ] || [ "$rax0_7986" -eq "1" ]; then
-    rax0=0
-    fi
+    band=$((band+1))
+done
 
-    log_i "decision flags: ra0=${ra0}, rax0=${rax0}"
-     
-    if [ "$rax0" -eq "1" ] && [ "$ra0" -eq "1" ]  ; then
-    run_bg wapp -d1 -v2 -cra0 -crax0
-    elif [ "$ra0" -eq "1" ] && [ "$rax0" -eq "0" ] ; then
-    run_bg wapp -d1 -v2 -cra0
-    elif [ "$rax0" -eq "1" ] && [ "$ra0" -eq "0" ] ; then
-    run_bg wapp -d1 -v2 -crax0
-    else
-    log_i "no interface requires wapp start"
-    fi
-sleep 1
-if [ "$rax0" -eq "1" ] || [ "$ra0" -eq "1" ]  ; then
-run_cmd iwpriv ra0 set mapR2Enable=0
-run_cmd iwpriv ra0 set mapTSEnable=0
-run_cmd iwpriv ra0 set mapR3Enable=0
-run_cmd iwpriv ra0 set DppEnable=0
-run_cmd iwpriv rax0 set mapR2Enable=0
-run_cmd iwpriv rax0 set mapTSEnable=0
-run_cmd iwpriv rax0 set mapR3Enable=0
-run_cmd iwpriv rax0 set DppEnable=0
-run_cmd iwpriv ra0 set mapEnable=2
-run_cmd iwpriv rax0 set mapEnable=2
-run_bg bs20
-run_cmd wappctrl rax0 mbo reset_default
-run_cmd wappctrl ra0 mbo reset_default
-rax0_7981="$(uci -q get wireless.default_MT7981_1_2.steeringbssid 2>/dev/null)"
-rax0_7986="$(uci -q get wireless.default_MT7986_1_2.steeringbssid 2>/dev/null)"
-if [ -n "$rax0_7981" ]; then
-	run_cmd /sbin/setbssid rax0 "$rax0_7981"
-fi
+log_i "wapp_args: ${wapp_args}"
 
-if [ -n "$rax0_7986" ]; then
-	run_cmd /sbin/setbssid rax0 "$rax0_7986"
-fi
-
-ra0_7981="$(uci -q get wireless.default_MT7981_1_1.steeringbssid 2>/dev/null)"
-ra0_7986="$(uci -q get wireless.default_MT7986_1_1.steeringbssid 2>/dev/null)"
-if [ -n "$ra0_7981" ]; then
-	run_cmd /sbin/setbssid ra0 "$ra0_7981"
-fi
-
-if [ -n "$ra0_7986" ]; then
-	run_cmd /sbin/setbssid ra0 "$ra0_7986"
-fi
-
+if [ -n "$wapp_args" ]; then
+    # shellcheck disable=SC2086
+    run_bg wapp -d1 -v2 $wapp_args
+    sleep 1
+    run_bg bs20
+    band=0
+    for ifname in $IFNAMES; do
+        enabled=0
+        eval "enabled=\${map_${band}:-0}"
+        if [ "$enabled" -eq "1" ]; then
+            run_cmd wappctrl "$ifname" mbo reset_default
+        fi
+        band=$((band+1))
+    done
 fi
 
 log_i "startwapp.sh done"

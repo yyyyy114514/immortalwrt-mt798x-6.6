@@ -20,12 +20,14 @@ define Package/mtwifi-cfg
   DEPENDS:=+iwinfo +wifi-dats +lua-cjson +datconf-lua  
 endef
 
+# mtwifi-wapp: EasyMesh (MAP/wapp/bs20) 用户态 daemon 包。
+# 本分支采用 wifi-profile + luci-app-mtk 方案管理无线(无 UCI wireless),
+# 因此 wapp 不再依赖 mtwifi-cfg, 由 startwapp.sh 直接读取 dat 文件驱动。
 define Package/mtwifi-wapp
 	SECTION:=MTK Properties
 	CATEGORY:=MTK Properties
 	SUBMENU:=Applications
-	TITLE:=mtwifi wapp scripts for mt798x
-	DEPENDS:=+mtwifi-cfg
+	TITLE:=mtwifi wapp scripts for mt798x (EasyMesh/MAP daemons)
 endef
 
 define Build/Compile
