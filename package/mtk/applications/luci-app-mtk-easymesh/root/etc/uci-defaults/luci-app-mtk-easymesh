@@ -1,9 +1,103 @@
 #!/bin/sh
 
+# register the easymesh UCI config in ucitrack
 uci -q batch <<-EOF >/dev/null
 	delete ucitrack.@easymesh[-1]
 	add ucitrack easymesh
 EOF
+
+# migrate existing installations:
+#  - drop the legacy "mode" option (superseded by device_mode)
+#  - backfill any option added after the initial release with its default
+[ -f /etc/config/easymesh ] && {
+	uci -q get easymesh.config >/dev/null || exit 0
+
+	uci -q delete easymesh.config.mode
+
+	set_default() {
+		local option="$1" value="$2"
+		[ -n "$(uci -q get easymesh.config.$option)" ] || uci -q set easymesh.config.$option="$value"
+	}
+
+	# steering / roaming
+	set_default steering '1'
+	set_default steer_rssi_th '-54'
+	set_default roam_rssi_th '-70'
+	set_default lr_steer_edge '25'
+	set_default lr_steer_edge_root ''
+	set_default scan_th_2g '-88'
+	set_default scan_th_5g '-88'
+	set_default scan_th_6g '-88'
+	set_default bh_steer_timeout '120'
+	set_default centralized_steering '0'
+	set_default metric_interval '60'
+
+	# map feature switches
+	set_default non_map_ap '1'
+	set_default third_party '0'
+	set_default role_detect_ext '0'
+	set_default dhcp_ctl '0'
+	set_default quick_ch_change '1'
+	set_default psc_6g '0'
+
+	# device / data element info
+	set_default lan_if 'eth0'
+	set_default wan_if 'eth1'
+	set_default de_serial 'v3.0'
+	set_default de_sw_ver 'v3.0'
+	set_default de_exec_env 'Linux-Openwrt'
+	set_default de_chipset_vendor 'MediaTek'
+
+	# backhaul
+	set_default bh_prio_2g '0'
+	set_default bh_prio_5gl '1'
+	set_default bh_prio_5gh '1'
+	set_default bh_prio_6g '1'
+	set_default auto_bh_switch '1'
+	set_default bss_prio 'ra0;rax0;apclix0'
+	set_default bh_type 'eth'
+
+	# backhaul STA profiles
+	for i in 0 1 2; do
+		set_default bh${i}_valid '0'
+	done
+
+	# channel planning
+	set_default ch_plan_enable '0'
+	set_default ch_plan_init_timeout '120'
+	set_default ch_plan_scan_valid '14400'
+	set_default divergent_ch_plan '0'
+
+	# network optimization
+	set_default nop_enable '0'
+	set_default nop_bootup_wait '45'
+	set_default nop_connect_wait '45'
+	set_default nop_disconnect_wait '45'
+	set_default nop_periodicity '3600'
+	set_default nop_score_margin '100'
+	set_default nop_prefer_5g '0'
+	set_default nop_prefer_5g_retry '0'
+	set_default nop_post_cac '30'
+	set_default nop_data_collect '60'
+	set_default nop_user_prio '0'
+
+	# channel utilization thresholds
+	set_default cu_th_2g '70'
+	set_default cu_th_5gl '80'
+	set_default cu_th_5gh '80'
+	set_default cu_th_6g '80'
+
+	# 1905d.cfg
+	set_default radio_band '24G;5G;5G;'
+	set_default br_inf 'br-lan'
+	set_default al_inf 'ra0'
+	set_default map_ver 'R1'
+	set_default decrypt_fail_th '10'
+	set_default gtk_rekey '3600'
+	set_default ob_wan_only '0'
+
+	uci -q commit easymesh
+}
 
 rm -f /tmp/luci-indexcache
 exit 0

@@ -12,8 +12,20 @@ var callGetTopology = rpc.declare({
 
 var showAll = false;
 
+function roleText(role) {
+	return role == 'controller' ? _('Controller')
+		: role == 'agent' ? _('Agent')
+		: role == 'auto' ? _('Auto')
+		: role == 'router' ? _('Router')
+		: role == 'bridge' ? _('Bridge')
+		: role == 'unknown' ? _('Unknown')
+		: (role || '-');
+}
+
 function roleColor(role) {
-	return (role == 'agent') ? '#e8912d' : '#2f6fd0';
+	return (role == 'agent') ? '#e8912d'
+		: (role == 'controller') ? '#2f6fd0'
+		: '#808894';
 }
 
 function nodeBox(title, lines, color) {
@@ -31,7 +43,7 @@ function nodeBox(title, lines, color) {
 
 function renderTopology(topo) {
 	topo = topo || {};
-	var role = topo.device_role || 'controller';
+	var role = topo.device_role || 'auto';
 	var color = roleColor(role);
 	var children = [];
 
@@ -40,7 +52,8 @@ function renderTopology(topo) {
 			_('wapp is not running. Enable EasyMesh and apply the configuration first.')));
 
 	var devLines = [
-		'%s: %s'.format(_('Role'), role),
+		'%s: %s'.format(_('Role'), roleText(role)),
+		'%s: %s'.format(_('Mode'), roleText(topo.device_mode)),
 		'%s: %s'.format(_('AL MAC'), topo.al_mac || '-'),
 		'%s: %s'.format(_('MAP version'), topo.map_ver || '-')
 	];

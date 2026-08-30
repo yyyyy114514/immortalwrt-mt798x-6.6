@@ -3,13 +3,57 @@
 		"description": "Grant access to MTK EasyMesh (MAP) configuration",
 		"read": {
 			"ubus": {
-				"luci.easymesh": [ "getConfig", "getStatus", "getTopology", "dppUriShow" ]
+				"luci.easymesh": [
+					"getConfig",
+					"getStatus",
+					"getTopology",
+					"proxyArpList",
+					"dppBootstrapGetUri",
+					"dppBootstrapInfo",
+					"dppConfiguratorGetKey",
+					"wappVersion"
+				]
 			},
 			"uci": [ "easymesh", "wireless" ]
 		},
 		"write": {
 			"ubus": {
-				"luci.easymesh": [ "applyConfig", "resetDefault", "pbcTrigger", "dppUriAdd" ]
+				"luci.easymesh": [
+					"applyConfig",
+					"resetDefault",
+					"pbcTrigger",
+					"wappReload",
+					"steerSta",
+					"btmReq",
+					"wnmReq",
+					"wnmReq2",
+					"qosMap",
+					"setBhType",
+					"dppQrCode",
+					"dppBootstrapGen",
+					"dppBootstrapRemove",
+					"dppConfiguratorAdd",
+					"dppConfiguratorRemove",
+					"dppConfiguratorSign",
+					"dppAuthInit",
+					"dppPkexAdd",
+					"dppPkexRemove",
+					"dppStart",
+					"dppListen",
+					"dppStopListen",
+					"dppSetBhWifi",
+					"dppResetConfig",
+					"dppResetMapdUserConfig",
+					"dppControllerStart",
+					"dppControllerStop",
+					"dppChirpChEn",
+					"dppChirpNotif",
+					"dppOnboardType",
+					"dppPresenceEnable",
+					"dppReconfigEnable",
+					"dppCceIndicationStart",
+					"dppDevSetCfg"
+				]
 			},
 			"uci": [ "easymesh", "wireless" ]
 		}
