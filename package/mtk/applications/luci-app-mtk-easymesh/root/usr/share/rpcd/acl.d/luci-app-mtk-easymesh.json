@@ -1,0 +1,17 @@
+{
+	"luci-app-mtk-easymesh": {
+		"description": "Grant access to MTK EasyMesh (MAP) configuration",
+		"read": {
+			"ubus": {
+				"luci.easymesh": [ "getConfig", "getStatus", "getTopology", "dppUriShow" ]
+			},
+			"uci": [ "easymesh", "wireless" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.easymesh": [ "applyConfig", "resetDefault", "pbcTrigger", "dppUriAdd" ]
+			},
+			"uci": [ "easymesh", "wireless" ]
+		}
+	}
+}

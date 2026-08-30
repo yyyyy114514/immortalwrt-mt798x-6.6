@@ -1,0 +1,406 @@
+#!/usr/bin/env lua
+
+local json = require "luci.jsonc"
+local fs   = require "nixio.fs"
+local util = require "luci.util"
+local sys  = require "luci.sys"
+local uci  = require "luci.model.uci"
+
+local MAPD_CFG  = "/etc/map/mapd_cfg"
+local MAP1905   = "/etc/map/1905d.cfg"
+local WAPPCTRL  = "/sbin/wappctrl"
+local STARTWAPP = "/sbin/startwapp.sh"
+
+local function readfile(path)
+	local s = fs.readfile(path)
+	return s and (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function exec(cmd)
+	local h = io.popen(cmd .. " 2>/dev/null")
+	local out = h and h:read("*a") or ""
+	if h then h:close() end
+	return out or ""
+end
+
+local function run(cmd)
+	return sys.call(cmd .. " >/dev/null 2>&1")
+end
+
+local function sed_escape(s)
+	return tostring(s):gsub("\\", "\\\\"):gsub("&", "\\&"):gsub("|", "\\|")
+end
+
+local function sed_kv(file, key, value)
+	if not fs.access(file) then return end
+	run(string.format("sed -i 's|^%s=.*|%s=%s|' '%s'", key, key, sed_escape(value), file))
+end
+
+local function get_kv(file, key)
+	if not fs.access(file) then return nil end
+	local out = exec(string.format("sed -n 's|^%s=\\(.*\\)|\\1|p' '%s' | head -n1", key, file))
+	out = out:gsub("^%s+", ""):gsub("%s+$", "")
+	return (out ~= "") and out or nil
+end
+
+local function br_mac()
+	local m = readfile("/sys/class/net/br-lan/address")
+	return m and m:lower() or ""
+end
+
+local function proc_running(name)
+	local out = exec("pgrep -x '" .. name .. "'")
+	return out:gsub("%s+", "") ~= ""
+end
+
+local function mtwifi_radios()
+	local cursor = uci.cursor()
+	local radios = {}
+	cursor:foreach("wireless", "wifi-device", function(s)
+		if s.type == "mtwifi" then
+			table.insert(radios, {
+				name = s[".name"],
+				band = s.band or "",
+				channel = s.channel or "",
+				dbdc_main = s.dbdc_main or "0"
+			})
+		end
+	end)
+	return radios
+end
+
+local function ifname_for_radio(name)
+	local cursor = uci.cursor()
+	local idx = cursor:get("wireless", name, "ifidx") or "0"
+	local band = cursor:get("wireless", name, "band") or ""
+	if band == "5g" or band == "5G" or name:match("_2$") then
+		return "rax" .. idx
+	end
+	return "ra" .. idx
+end
+
+local MAP_SCHEMA = {
+	{ u = "mode",                 f = MAPD_CFG, k = "mode",                          d = "0" },
+	{ u = "steering",             f = MAPD_CFG, k = "SteerEnable",                   d = "1" },
+	{ u = "dpp_uri",              f = MAPD_CFG, k = "dpp%-uri",                      d = "" },
+	{ u = "steer_rssi_th",        f = MAPD_CFG, k = "APSteerRssiTh",                 d = "-54" },
+	{ u = "roam_rssi_th",         f = MAPD_CFG, k = "force_roam_rssi_th",            d = "-70" },
+	{ u = "lr_steer_edge",        f = MAPD_CFG, k = "LowRSSIAPSteerEdge_RE",         d = "25" },
+	{ u = "scan_th_2g",           f = MAPD_CFG, k = "ScanThreshold2g",               d = "-88" },
+	{ u = "scan_th_5g",           f = MAPD_CFG, k = "ScanThreshold5g",               d = "-88" },
+	{ u = "scan_th_6g",           f = MAPD_CFG, k = "ScanThreshold6g",               d = "-88" },
+	{ u = "bh_steer_timeout",     f = MAPD_CFG, k = "BHSteerTimeout",                d = "120" },
+	{ u = "centralized_steering", f = MAPD_CFG, k = "CentralizedSteering",           d = "0" },
+	{ u = "bh_prio_2g",           f = MAPD_CFG, k = "BhPriority2G",                  d = "0" },
+	{ u = "bh_prio_5gl",          f = MAPD_CFG, k = "BhPriority5GL",                 d = "1" },
+	{ u = "bh_prio_5gh",          f = MAPD_CFG, k = "BhPriority5GH",                 d = "1" },
+	{ u = "bh_prio_6g",           f = MAPD_CFG, k = "BhPriority6G",                  d = "1" },
+	{ u = "auto_bh_switch",       f = MAPD_CFG, k = "AutoBHSwitching",               d = "1" },
+	{ u = "dual_bh",              f = MAPD_CFG, k = "DualBH",                        d = "" },
+	{ u = "bss_prio",             f = MAPD_CFG, k = "bss_config_priority",           d = "ra0;rax0;apclix0" },
+	{ u = "ch_plan_enable",       f = MAPD_CFG, k = "ChPlanningEnable",              d = "0" },
+	{ u = "ch_plan_init_timeout", f = MAPD_CFG, k = "ChPlanningInitTimeout",         d = "120" },
+	{ u = "ch_plan_scan_valid",   f = MAPD_CFG, k = "ChPlanningScanValidTime",       d = "14400" },
+	{ u = "ch_plan_ch_2g",        f = MAPD_CFG, k = "ChPlanningUserPreferredChannel2G",  d = "" },
+	{ u = "ch_plan_ch_5gl",       f = MAPD_CFG, k = "ChPlanningUserPreferredChannel5G",  d = "" },
+	{ u = "ch_plan_ch_5gh",       f = MAPD_CFG, k = "ChPlanningUserPreferredChannel5GH", d = "" },
+	{ u = "ch_plan_ch_6g",        f = MAPD_CFG, k = "ChPlanningUserPreferredChannel6G",  d = "" },
+	{ u = "divergent_ch_plan",    f = MAPD_CFG, k = "DivergentChPlanning",           d = "0" },
+	{ u = "nop_enable",           f = MAPD_CFG, k = "NetworkOptimizationEnabled",    d = "0" },
+	{ u = "nop_bootup_wait",      f = MAPD_CFG, k = "NtwrkOptBootupWaitTime",        d = "45" },
+	{ u = "nop_connect_wait",     f = MAPD_CFG, k = "NtwrkOptConnectWaitTime",       d = "45" },
+	{ u = "nop_disconnect_wait",  f = MAPD_CFG, k = "NtwrkOptDisconnectWaitTime",    d = "45" },
+	{ u = "nop_periodicity",      f = MAPD_CFG, k = "NtwrkOptPeriodicity",           d = "3600" },
+	{ u = "nop_score_margin",     f = MAPD_CFG, k = "NetworkOptimizationScoreMargin", d = "100" },
+	{ u = "nop_prefer_5g",        f = MAPD_CFG, k = "NetworkOptPrefer5Gover2G",      d = "0" },
+	{ u = "nop_prefer_5g_retry",  f = MAPD_CFG, k = "NetworkOptPrefer5Gover2GRetryCnt", d = "0" },
+	{ u = "nop_post_cac",         f = MAPD_CFG, k = "NtwrkOptPostCACTriggerTime",    d = "30" },
+	{ u = "nop_data_collect",     f = MAPD_CFG, k = "NtwrkOptDataCollectionTime",    d = "60" },
+	{ u = "nop_user_prio",        f = MAPD_CFG, k = "NetOptUserSetPriority",         d = "0" },
+	{ u = "cu_th_2g",             f = MAPD_CFG, k = "CUOverloadTh_2G",               d = "70" },
+	{ u = "cu_th_5gl",            f = MAPD_CFG, k = "CUOverloadTh_5G_L",             d = "80" },
+	{ u = "cu_th_5gh",            f = MAPD_CFG, k = "CUOverloadTh_5G_H",             d = "80" },
+	{ u = "dhcp_ctl",             f = MAPD_CFG, k = "DhcpCtl",                       d = "0" },
+	{ u = "third_party",          f = MAPD_CFG, k = "ThirdPartyConnection",          d = "0" },
+	{ u = "quick_ch_change",      f = MAPD_CFG, k = "MAP_QuickChChange",             d = "1" },
+	{ u = "metric_interval",      f = MAPD_CFG, k = "MetricRepIntv",                 d = "60" },
+	{ u = "role_detect_ext",      f = MAPD_CFG, k = "role_detection_external",       d = "0" },
+	{ u = "non_map_ap",           f = MAPD_CFG, k = "NonMAPAPEnable",                d = "1" },
+	{ u = "psc_6g",               f = MAPD_CFG, k = "SetPSCChannel_6G",              d = "0" },
+	{ u = "bh_type",              f = MAP1905,  k = "bh_type",                       d = "eth" },
+	{ u = "radio_band",           f = MAP1905,  k = "radio_band",                    d = "24G;5G;5G;" },
+	{ u = "br_inf",               f = MAP1905,  k = "br_inf",                        d = "br-lan" },
+	{ u = "bss_prio",             f = MAP1905,  k = "bss_config_priority",           d = "ra0;rax0;apclix0" },
+	{ u = "decrypt_fail_th",      f = MAP1905,  k = "decrypt_fail_threshold",        d = "10" },
+	{ u = "gtk_rekey",            f = MAP1905,  k = "gtk_rekey_interval",            d = "3600" },
+	{ u = "ob_wan_only",          f = MAP1905,  k = "ob_wan_only",                   d = "0" },
+}
+
+local function parse_stainfo(text)
+	local stas = {}
+	for line in text:gmatch("[^\r\n]+") do
+		local mac = line:match("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)")
+		if mac then
+			local rssi = line:match("(-%d+)")
+			table.insert(stas, { mac = mac:upper(), rssi = rssi or "" })
+		end
+	end
+	return stas
+end
+
+local function collect_stas()
+	local all = {}
+	for _, r in ipairs(mtwifi_radios()) do
+		if r.dbdc_main == "1" then
+			local ifn = ifname_for_radio(r.name)
+			local raw = exec("iwpriv " .. ifn .. " show stainfo")
+			local stas = parse_stainfo(raw)
+			for _, s in ipairs(stas) do
+				s.radio = r.name
+				s.ifname = ifn
+				s.band = r.band
+				table.insert(all, s)
+			end
+		end
+	end
+	return all
+end
+
+local function current_role()
+	local root = get_kv(MAP1905, "map_root")
+	if root == "1" then return "controller" end
+	if root == "0" then return "agent" end
+	return "controller"
+end
+
+local methods = {
+	getConfig = {
+		call = function()
+			local cursor = uci.cursor()
+			local cfg = {}
+
+			cfg.enabled = cursor:get("easymesh", "config", "enabled") or "0"
+			cfg.device_mode = cursor:get("easymesh", "config", "device_mode") or "router"
+			cfg.device_role = cursor:get("easymesh", "config", "device_role") or "controller"
+			cfg.mesh_sr = cursor:get("easymesh", "config", "mesh_sr") or "1"
+			cfg.bandsteering = cursor:get("easymesh", "config", "bandsteering") or "1"
+			cfg.steeringthresold = cursor:get("easymesh", "config", "steeringthresold") or "-65"
+
+			for _, e in ipairs(MAP_SCHEMA) do
+				if cfg[e.u] == nil then
+					cfg[e.u] = cursor:get("easymesh", "config", e.u) or e.d
+				end
+			end
+
+			cfg.cur_mode = get_kv(MAPD_CFG, "mode") or "0"
+			cfg.cur_role = current_role()
+			print(json.stringify(cfg))
+		end
+	},
+
+	getStatus = {
+		call = function()
+			local status = {
+				wapp_running = proc_running("wapp"),
+				bs20_running = proc_running("bs20"),
+				al_mac = br_mac(),
+				map_ver = get_kv(MAP1905, "map_ver") or "",
+				device_role = current_role(),
+				controller_alid = get_kv(MAP1905, "map_controller_alid") or "",
+				agent_alid = get_kv(MAP1905, "map_agent_alid") or "",
+				steer_enable = get_kv(MAPD_CFG, "SteerEnable") or "",
+				radios = mtwifi_radios()
+			}
+			print(json.stringify(status))
+		end
+	},
+
+	getTopology = {
+		call = function()
+			local topo = {
+				al_mac = br_mac(),
+				map_ver = get_kv(MAP1905, "map_ver") or "",
+				device_role = current_role(),
+				controller_alid = get_kv(MAP1905, "map_controller_alid") or "",
+				agent_alid = get_kv(MAP1905, "map_agent_alid") or "",
+				wapp_running = proc_running("wapp"),
+				radios = mtwifi_radios(),
+				stations = collect_stas()
+			}
+			print(json.stringify(topo))
+		end
+	},
+
+	applyConfig = {
+		call = function()
+			local cursor = uci.cursor()
+			local enabled = cursor:get("easymesh", "config", "enabled") or "0"
+			local role = cursor:get("easymesh", "config", "device_role") or "controller"
+			local mesh_sr = cursor:get("easymesh", "config", "mesh_sr") or "1"
+			local bandsteering = cursor:get("easymesh", "config", "bandsteering") or "1"
+			local steeringthresold = cursor:get("easymesh", "config", "steeringthresold") or "-65"
+
+			local dev_role = (role == "agent") and "1" or "0"
+			local map_root = (role == "agent") and "0" or "1"
+
+			sed_kv(MAPD_CFG, "DeviceRole", dev_role)
+
+			for _, e in ipairs(MAP_SCHEMA) do
+				local v = cursor:get("easymesh", "config", e.u)
+				if v == nil then v = e.d end
+				sed_kv(e.f, e.k, v)
+			end
+
+			sed_kv(MAP1905, "map_root", map_root)
+			sed_kv(MAP1905, "map_agent", "1")
+
+			local al = br_mac()
+			if al ~= "" then
+				if role == "agent" then
+					sed_kv(MAP1905, "map_agent_alid", al)
+				else
+					sed_kv(MAP1905, "map_controller_alid", al)
+					sed_kv(MAP1905, "map_agent_alid", al)
+				end
+			end
+
+			cursor:foreach("wireless", "wifi-device", function(s)
+				if s.type == "mtwifi" then
+					cursor:set("wireless", s[".name"], "wapp", enabled)
+					cursor:set("wireless", s[".name"], "bandsteering", bandsteering)
+					if enabled == "1" then
+						cursor:set("wireless", s[".name"], "ieee80211r", mesh_sr)
+					end
+				end
+			end)
+			cursor:foreach("wireless", "wifi-iface", function(s)
+				if s.mode == "ap" or s.mode == nil then
+					cursor:set("wireless", s[".name"], "steeringthresold", steeringthresold)
+				end
+			end)
+			cursor:commit("wireless")
+
+			run("killall wapp bs20")
+			if enabled == "1" and fs.access(STARTWAPP) then
+				run(STARTWAPP)
+			end
+
+			print(json.stringify({ ok = true, enabled = enabled }))
+		end
+	},
+
+	resetDefault = {
+		call = function()
+			sed_kv(MAPD_CFG, "DeviceRole", "0")
+			sed_kv(MAP1905, "map_root", "1")
+			sed_kv(MAP1905, "map_agent", "1")
+
+			for _, e in ipairs(MAP_SCHEMA) do
+				sed_kv(e.f, e.k, e.d)
+			end
+
+			local cursor = uci.cursor()
+			cursor:set("easymesh", "config", "enabled", "0")
+			cursor:set("easymesh", "config", "device_mode", "router")
+			cursor:set("easymesh", "config", "device_role", "controller")
+			cursor:set("easymesh", "config", "mesh_sr", "1")
+			cursor:set("easymesh", "config", "bandsteering", "1")
+			cursor:set("easymesh", "config", "steeringthresold", "-65")
+			for _, e in ipairs(MAP_SCHEMA) do
+				cursor:set("easymesh", "config", e.u, e.d)
+			end
+			cursor:commit("easymesh")
+
+			cursor:foreach("wireless", "wifi-device", function(s)
+				if s.type == "mtwifi" then
+					cursor:set("wireless", s[".name"], "wapp", "0")
+				end
+			end)
+			cursor:commit("wireless")
+
+			run("killall wapp bs20")
+
+			print(json.stringify({ ok = true }))
+		end
+	},
+
+	pbcTrigger = {
+		args = { iface = "" },
+		call = function(args)
+			local iface = (args and args.iface ~= "") and args.iface or "ra0"
+			local out = exec(WAPPCTRL .. " " .. iface .. " wps_pbc_trigger")
+			print(json.stringify({ ok = true, output = out }))
+		end
+	},
+
+	dppUriAdd = {
+		args = { uri = "" },
+		call = function(args)
+			local uri = (args and args.uri) or ""
+			sed_kv(MAPD_CFG, "dpp%-uri", uri)
+			local cursor = uci.cursor()
+			cursor:set("easymesh", "config", "dpp_uri", uri)
+			cursor:commit("easymesh")
+			print(json.stringify({ ok = true }))
+		end
+	},
+
+	dppUriShow = {
+		call = function()
+			local out = exec(WAPPCTRL .. " ra0 dpp_bootstrap_get_uri 0")
+			print(json.stringify({ uri = get_kv(MAPD_CFG, "dpp%-uri") or "", output = out }))
+		end
+	}
+}
+
+local function parseInput()
+	local parse = json.new()
+	local done, err
+	while true do
+		local chunk = io.read(4096)
+		if not chunk then break
+		elseif not done and not err then
+			done, err = parse:parse(chunk)
+		end
+	end
+	if not done then
+		print(json.stringify({ error = err or "Incomplete input" }))
+		os.exit(1)
+	end
+	return parse:get()
+end
+
+local function validateArgs(func, uargs)
+	local method = methods[func]
+	if not method then
+		print(json.stringify({ error = "Method not found" }))
+		os.exit(1)
+	end
+	if type(uargs) ~= "table" then
+		print(json.stringify({ error = "Invalid arguments" }))
+		os.exit(1)
+	end
+	uargs.ubus_rpc_session = nil
+	local margs = method.args or {}
+	for k, v in pairs(uargs) do
+		if margs[k] == nil or (v ~= nil and type(v) ~= type(margs[k])) then
+			print(json.stringify({ error = "Invalid arguments" }))
+			os.exit(1)
+		end
+	end
+	return method
+end
+
+if arg[1] == "list" then
+	local rv = {}
+	for name, method in pairs(methods) do
+		rv[name] = method.args or {}
+	end
+	print((json.stringify(rv):gsub(":%[%]", ":{}")))
+elseif arg[1] == "call" then
+	local args = parseInput()
+	local method = validateArgs(arg[2], args)
+	local result, code = method.call(args)
+	print((json.stringify(result):gsub("^%[%]$", "{}")))
+	os.exit(code or 0)
+end

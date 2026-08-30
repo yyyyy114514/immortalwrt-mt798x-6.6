@@ -1,0 +1,26 @@
+{
+	"admin/network/easymesh": {
+		"title": "EasyMesh",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "easymesh/config"
+		},
+		"depends": {
+			"acl": [ "luci-app-mtk-easymesh" ],
+			"uci": { "easymesh": true }
+		}
+	},
+	"admin/network/easymesh/topology": {
+		"title": "EasyMesh Topology",
+		"order": 56,
+		"action": {
+			"type": "view",
+			"path": "easymesh/topology"
+		},
+		"depends": {
+			"acl": [ "luci-app-mtk-easymesh" ],
+			"uci": { "easymesh": true }
+		}
+	}
+}
