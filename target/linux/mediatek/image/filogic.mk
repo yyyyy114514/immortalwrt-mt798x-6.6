@@ -2135,6 +2135,15 @@ define Device/supergateway_s20p
 endef
 TARGET_DEVICES += supergateway_s20p
 
+# CLX S20P — 与 Super Gateway S20P 同一公版硬件, 品牌不同
+define Device/clx_s20p
+  $(call Device/supergateway_s20-common)
+  DEVICE_VENDOR := CLX
+  DEVICE_MODEL := S20P
+  DEVICE_DTS := mt7986a-supergateway-s20p
+endef
+TARGET_DEVICES += clx_s20p
+
 define Device/bt_r320
   DEVICE_VENDOR := BT
   DEVICE_MODEL := BT-R320

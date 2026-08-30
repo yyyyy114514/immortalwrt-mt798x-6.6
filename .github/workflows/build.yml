@@ -3,21 +3,6 @@ name: Build ImmortalWrt MT798x (mtwifi + EasyMesh)
 on:
   workflow_dispatch:
     inputs:
-      soc:
-        description: "芯片型号 (决定无线驱动与配置基线)。mt7981/7986 用 mtwifi 闭源 + EasyMesh, mt7988 用开源 mt76。auto 按所选设备自动归类"
-        required: false
-        default: "auto"
-        type: choice
-        options:
-          - "auto"
-          - "mt7981"
-          - "mt7986"
-          - "mt7988"
-      devices:
-        description: "要编译的设备ID (逗号/空格分隔, 支持模糊匹配)。填 help 查看全部设备; 填 all 构建所选芯片全部设备。例如: netcore_n60-pro xiaomi_redmi-router-ax6000-ubootmod"
-        required: true
-        default: ""
-        type: string
       jobs:
         description: "编译线程数"
         required: false
@@ -40,46 +25,18 @@ permissions:
   contents: write
 
 jobs:
-  # 解析多选设备 -> 按 SoC 分组的动态矩阵 (每个 SoC 一个构建任务并行)
-  resolve:
-    runs-on: ubuntu-22.04
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-    steps:
-      - name: Checkout source (本仓即 ImmortalWrt 源码树)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Resolve devices -> build matrix
-        id: gen
-        run: |
-          set -euo pipefail
-          python3 scripts/mtk-device-matrix.py resolve \
-            --soc "${{ github.event.inputs.soc }}" \
-            --devices "${{ github.event.inputs.devices }}" | tee resolve.log
-          grep '^matrix=' resolve.log | tail -1 >> "$GITHUB_OUTPUT"
-          echo "=== 本次构建矩阵 ==="
-          grep '^matrix=' resolve.log | tail -1
-
   build:
-    needs: resolve
-    if: needs.resolve.outputs.matrix != '[]'
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        cfg: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
       - name: Checkout source (本仓即 ImmortalWrt 源码树)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Set env (SoC / 配置文件名)
+      - name: Set env
         run: |
-          echo "SOC=${{ matrix.cfg.soc }}" >> "$GITHUB_ENV"
-          echo "CFG=${{ matrix.cfg.file }}" >> "$GITHUB_ENV"
+          echo "SOC=mt7986" >> "$GITHUB_ENV"
+          echo "CFG=mt7986-selected.config" >> "$GITHUB_ENV"
 
       - name: Free disk space
         run: |
@@ -154,13 +111,10 @@ jobs:
       # ===== 配置 =====
       - name: Apply defconfig
         run: |
-          python3 scripts/mtk-device-matrix.py gen \
-            --soc "${{ matrix.cfg.soc }}" \
-            --devices "${{ matrix.cfg.devices }}" \
-            --output "defconfig/${{ matrix.cfg.file }}"
-          cp -f "defconfig/${{ matrix.cfg.file }}" .config
+          cp -f "defconfig/$CFG" .config
           sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
-          grep -E "CONFIG_TARGET_DEVICE_mediatek" .config || true
+          echo "=== 本次编译设备 ==="
+          grep -E "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
 
       - name: Generate full config
         run: |
@@ -191,7 +145,7 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           export PATH="/usr/lib/ccache:$PATH"
           echo "CCACHE_DIR=$CCACHE_DIR"
-          echo "===== 开始编译 (${{ matrix.cfg.file }}, 有 toolchain+ccache 缓存约30-50min) ====="
+          echo "===== 开始编译 ($CFG, 有 toolchain+ccache 缓存约30-50min) ====="
           # 说明: ImmortalWrt/OpenWrt 顶层不支持 'make image',
           #   镜像生成由 target/linux/install 在 make world 内部跑完。
           make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
@@ -268,7 +222,7 @@ jobs:
             - 内核: 6.6 / 驱动: mtwifi 闭源 7.6.6.1 (mt7988 用开源 mt76)
             - EasyMesh: mtwifi-wapp (MAP R2/R3, 802.11k/v/r, Band Steering)
             - 插件: turboacc-mtk, AdGuardHome, SmartDNS, OpenClash, Argon
-            - 配置: defconfig/${{ matrix.cfg.file }}
+            - 配置: defconfig/$CFG
 
             ### 默认登录
             - 地址: http://192.168.6.1
