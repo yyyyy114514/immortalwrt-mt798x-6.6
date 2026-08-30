@@ -27,6 +27,7 @@ define Package/mtwifi-wapp
 	SECTION:=MTK Properties
 	CATEGORY:=MTK Properties
 	SUBMENU:=Applications
+	DEPENDS:=+libkvcutil
 	TITLE:=mtwifi wapp scripts for mt798x (EasyMesh/MAP daemons)
 endef
 
