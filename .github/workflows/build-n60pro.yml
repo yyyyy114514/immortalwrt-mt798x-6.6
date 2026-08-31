@@ -1,0 +1,231 @@
+name: Build ImmortalWrt N60Pro only (mtwifi + EasyMesh)
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "编译线程数"
+        required: false
+        default: "16"
+        type: number
+      upload_release:
+        description: "是否上传到 GitHub Release"
+        required: false
+        default: "no"
+        type: choice
+        options:
+          - "no"
+          - "yes"
+
+concurrency:
+  group: build-n60pro-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source (本仓即 ImmortalWrt 源码树)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set env
+        run: |
+          echo "SOC=mt7986" >> "$GITHUB_ENV"
+          echo "CFG=mt7986-n60pro.config" >> "$GITHUB_ENV"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gcc-multilib g++-multilib \
+            binutils bzip2 cpio curl file fastjar gawk gettext \
+            git-core java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev libtool libxml-parser-perl make \
+            python3 python3-setuptools python3-pyelftools python3-pip \
+            qemu-utils rsync scons subversion swig time uglifyjs unzip \
+            upx-ucl wget xsltproc zlib1g-dev device-tree-compiler \
+            libgmp3-dev libmpc-dev libmpfr-dev autoconf automake
+          pip3 install pyelftools
+
+      - name: Set git config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ===== 缓存: dl / ccache / toolchain =====
+      - name: Cache dl (源码下载缓存)
+        id: cache-dl
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            package/mtk/drivers/mt_wifi/src
+          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            dl-${{ github.ref_name }}-
+            dl-
+
+      - name: Cache ccache
+        id: cache-ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            ccache-${{ github.ref_name }}-
+            ccache-
+
+      - name: Cache toolchain (工具链缓存)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/toolchain-*
+            staging_dir/host
+            staging_dir/host_*
+            build_dir/toolchain-*
+            build_dir/host-*
+            build_dir/host
+          key: toolchain-${{ github.ref_name }}-${{ hashFiles('target/linux/mediatek/Makefile', 'toolchain/*') }}
+          restore-keys: |
+            toolchain-${{ github.ref_name }}-
+            toolchain-
+
+      # ===== feeds =====
+      - name: Update & install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ===== 配置 =====
+      - name: Apply defconfig
+        run: |
+          cp -f "defconfig/$CFG" .config
+          sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
+          echo "=== 本次编译设备 ==="
+          grep -E "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y" .config || true
+
+      - name: Generate full config
+        run: |
+          make defconfig
+          echo "=== 关键包校验 ==="
+          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-mtk-easymesh|luci-app-openclash|luci-theme-argon|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
+
+      - name: Download sources
+        run: |
+          make download -j${{ github.event.inputs.jobs }} 2>&1 | tee -a download.log || make download -j1
+
+      # ===== 分阶段编译: toolchain -> packages -> image =====
+      - name: Build toolchain (如果无缓存则编译)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          export PATH="/usr/lib/ccache:$PATH"
+          echo "===== 编译工具链 (有缓存则跳过) ====="
+          make tools/install -j${{ github.event.inputs.jobs }} V=s > toolchain.log 2>&1 \
+            || { echo "===== TOOLS FAILED ====="; tail -100 toolchain.log; exit 1; }
+          make toolchain/install -j${{ github.event.inputs.jobs }} V=s >> toolchain.log 2>&1 \
+            || { echo "===== TOOLCHAIN FAILED ====="; tail -100 toolchain.log; exit 1; }
+          echo "===== TOOLCHAIN OK ====="
+
+      - name: Build firmware
+        run: |
+          echo "ccache version: $(ccache --version | head -1)"
+          export CCACHE_DIR="$HOME/.ccache"
+          export PATH="/usr/lib/ccache:$PATH"
+          echo "===== 开始编译 N60Pro 单台 ($CFG, 有 toolchain+ccache 缓存) ====="
+          make -j${{ github.event.inputs.jobs }} V=s > build.log 2>&1 \
+            || { echo "===== BUILD FAILED, 末尾 300 行 ====="; tail -300 build.log; exit 1; }
+          echo "===== BUILD OK ====="
+          echo "--- 最终产物列表 ---"
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img" -o -name "*.tar.gz" -o -name "*.sha" \) | sort
+          ccache -s | head -15
+
+      # ===== 缓存保存 =====
+      - name: Save ccache (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default') }}-${{ github.run_id }}
+
+      - name: Save toolchain (always)
+        if: always() && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            staging_dir/toolchain-*
+            staging_dir/host
+            staging_dir/host_*
+            build_dir/toolchain-*
+            build_dir/host-*
+            build_dir/host
+          key: toolchain-${{ github.ref_name }}-${{ hashFiles('target/linux/mediatek/Makefile', 'toolchain/*') }}-${{ github.run_id }}
+
+      - name: Save dl (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dl
+            package/mtk/drivers/mt_wifi/src
+          key: dl-${{ github.ref_name }}-${{ hashFiles('feeds.conf.default') }}-${{ github.run_id }}
+
+      - name: Verify build output
+        run: |
+          DIR=bin/targets/mediatek/filogic
+          if [ -d "$DIR" ] && ls "$DIR"/*.bin >/dev/null 2>&1; then
+            echo "=== 编译成功, 共 $(ls "$DIR"/*.bin 2>/dev/null | wc -l) 个固件 ==="
+            ls "$DIR" | sort
+          else
+            echo "=== 编译失败，最后 150 行日志 ==="
+            tail -150 build.log
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: immortalwrt-n60pro-mtwifi-easymesh
+          path: |
+            bin/targets/mediatek/filogic/**/*
+            build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload to Release
+        if: ${{ github.event.inputs.upload_release == 'yes' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: n60pro-build-${{ github.run_number }}
+          name: ImmortalWrt N60Pro (mtwifi + EasyMesh)
+          body: |
+            ## ImmortalWrt MT7986 — Netcore N60 Pro
+
+            - 内核: 6.6 / 驱动: mtwifi 闭源 (MTK MAP / wapp / bs20)
+            - EasyMesh 面板: luci-app-mtk-easymesh
+            - 配置: defconfig/$CFG
+
+            ### 默认登录
+            - 地址: http://192.168.6.1
+            - 用户名: root / 密码: 无
+
+            ### 启用 EasyMesh
+            LuCI -> 网络 -> 无线 -> 射频 -> 高级设置 -> 勾选 WAPP -> 保存并应用
+          files: |
+            bin/targets/mediatek/filogic/**/*.bin
+            bin/targets/mediatek/filogic/**/*.itb
+            bin/targets/mediatek/filogic/**/*.tar.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
