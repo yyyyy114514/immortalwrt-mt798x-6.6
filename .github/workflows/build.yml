@@ -120,7 +120,7 @@ jobs:
         run: |
           make defconfig
           echo "=== 关键包校验 ==="
-          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-openclash|luci-theme-argon|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
+          grep -E "mtwifi-wapp|luci-app-mtwifi-cfg|luci-app-mtk-easymesh|luci-app-openclash|luci-theme-argon|smartdns|luci-app-adguardhome|dnsmasq-full" .config || echo "!!! 有包未解析, 检查 feeds !!!"
 
       - name: Download sources
         run: |
